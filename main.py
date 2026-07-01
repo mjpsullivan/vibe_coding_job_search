@@ -1,11 +1,12 @@
 import asyncio
+import io
 import json
 import os
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pypdf import PdfReader
 
 app = FastAPI(title="Reeds Jobs API")
 
@@ -30,13 +31,14 @@ GREENHOUSE_BOARDS = [
 ]
 GREENHOUSE_URL = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
-class RankRequest(BaseModel):
-    cv: str
-    role: str
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract concatenated text from every page of a PDF."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 async def fetch_board(client: httpx.AsyncClient, token: str) -> list[dict]:
@@ -153,10 +155,15 @@ async def score_jobs_with_gemini(cv: str, role: str, jobs: list[dict]) -> list[d
 
 
 @app.post("/rank")
-async def rank_jobs(request: RankRequest) -> dict:
+async def rank_jobs(cv: UploadFile = File(...), role: str = Form(...)) -> dict:
     if not os.environ.get("GEMINI_API_KEY"):
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set")
 
+    cv_bytes = await cv.read()
+    cv_text = extract_pdf_text(cv_bytes)
+    if not cv_text.strip():
+        raise HTTPException(status_code=422, detail="Could not extract any text from the uploaded CV PDF")
+
     jobs = await fetch_all_jobs()
-    ranked = await score_jobs_with_gemini(request.cv, request.role, jobs)
+    ranked = await score_jobs_with_gemini(cv_text, role, jobs)
     return {"count": len(ranked), "jobs": ranked}
